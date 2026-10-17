@@ -5,7 +5,7 @@
     const state = status.calibration;
     if (!state) return;
     active = state.active;
-    const signature = JSON.stringify(status.people.map(p => [p.id,p.name]));
+    const signature = JSON.stringify(status.people.map(p => [p.id, p.name]));
     if (signature !== personSignature) {
       const selected = $('calibration-person').value;
       $('calibration-person').replaceChildren(new Option('Unregistered person', ''));
@@ -42,15 +42,15 @@
     const s = report.settings;
     settings.textContent = `Sharpness ≥ ${s.sharpness}; face size ≥ ${s.min_size}px; pose cue ≤ ${s.max_yaw}; similarity ≥ ${s.threshold}; candidate separation ≥ ${s.margin}; at least ${s.min_samples} agreeing views.`;
     target.append(heading, settings);
-    for (const split of ['tuning','validation']) {
+    for (const split of ['tuning', 'validation']) {
       const title = document.createElement('h3'); title.textContent = split === 'tuning' ? 'Tuning results' : 'Fresh validation results';
       target.append(title);
       const candidate = report[split], baseline = report[`baseline_${split}`];
       const table = document.createElement('table');
-      for (const values of [['Per passage','Current','Candidate'], ['Correct',baseline.correct,candidate.correct], ['No face samples',baseline.no_samples,candidate.no_samples],
-        ['Wrong identity',baseline.wrong,candidate.wrong], ['Missed registered',baseline.missed,candidate.missed],
-        ['Unregistered accepted',baseline.false_accepts,candidate.false_accepts], ['Duplicate tracks',baseline.duplicate_tracks,candidate.duplicate_tracks],
-        ['Average delay',baseline.mean_delay == null ? '—' : `${baseline.mean_delay}s`,candidate.mean_delay == null ? '—' : `${candidate.mean_delay}s`]]) {
+      for (const values of [['Per passage', 'Current', 'Candidate'], ['Correct', baseline.correct, candidate.correct], ['No face samples', baseline.no_samples, candidate.no_samples],
+      ['Wrong identity', baseline.wrong, candidate.wrong], ['Missed registered', baseline.missed, candidate.missed],
+      ['Unregistered accepted', baseline.false_accepts, candidate.false_accepts], ['Duplicate tracks', baseline.duplicate_tracks, candidate.duplicate_tracks],
+      ['Average delay', baseline.mean_delay == null ? '—' : `${baseline.mean_delay}s`, candidate.mean_delay == null ? '—' : `${candidate.mean_delay}s`]]) {
         const row = document.createElement('tr');
         values.forEach(value => { const cell = document.createElement('td'); cell.textContent = value; row.append(cell); }); table.append(row);
       }
@@ -62,14 +62,14 @@
     if (busy) return;
     busy = true; buttonIds.forEach(id => $(id).disabled = true);
     try {
-      const status = await api(`/api/calibration/${name}`, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const status = await api(`/api/calibration/${name}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
       update(status);
       message(name === 'apply' ? 'Reviewed settings applied and saved.' : name === 'start' ? 'Walk one labeled person through the camera view.' : 'Calibration updated.');
     } catch (error) { message(error.message); }
     finally { busy = false; if (window.faceStudioStatus) render(window.faceStudioStatus); }
   }
   $('tab-calibration').onclick = () => mode('calibration');
-  $('calibration-start').onclick = () => action('start', {person_id:$('calibration-person').value || null, split:$('calibration-split').value});
+  $('calibration-start').onclick = () => action('start', { person_id: $('calibration-person').value || null, split: $('calibration-split').value });
   $('calibration-stop').onclick = () => action('stop');
   $('calibration-cancel').onclick = () => action('cancel');
   $('calibration-analyze').onclick = () => action('analyze');

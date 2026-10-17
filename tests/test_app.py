@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -202,7 +203,8 @@ class FaceAppTests(unittest.TestCase):
             self.assertEqual(metadata['images'], expected)
             with np.load(folder / service.PROFILE_NAME, allow_pickle=False) as archived:
                 self.assertAlmostEqual(float(np.linalg.norm(archived['reference_embedding'])), 1.)
-            self.assertEqual((folder / service.PROFILE_NAME).stat().st_mode & 0o777, 0o600)
+            if os.name != 'nt':
+                self.assertEqual((folder / service.PROFILE_NAME).stat().st_mode & 0o777, 0o600)
             self.assertTrue(original.exists())
             self.assertEqual(service.FaceEngine().status()['person_count'], 2)
             with patch.object(service.np, 'savez_compressed', side_effect=OSError('Disk full')):

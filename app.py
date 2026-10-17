@@ -16,6 +16,7 @@ from flask import send_file
 from face_models import RetinaFace, ArcFace, EMBEDDING_SIZE, MODEL_ID, PROFILE_NAME
 from video_pipeline import VideoPipeline, DEFAULTS, quality_metrics, rejection
 from calibration import Calibration, load_settings
+from ble_scanner import BLEScanner, verify_tag
 
 ROOT = Path(__file__).resolve().parent
 PROFILE = ROOT / "data" / "profile.npz"
@@ -149,7 +150,8 @@ class FaceEngine:
                         raise ValueError("Invalid person name")
                     person = {"id": folder.name, "name": name.strip(), "features": features,
                               "reference": template, "sample_count": len(features),
-                              "directory": f"registration/{folder.name}"}
+                              "directory": f"registration/{folder.name}",
+                              "ble_tag_id": metadata.get("ble_tag_id")}
                 people[folder.name] = person
                 cache[folder.name] = (signature, person)
             except (OSError, ValueError, KeyError, TypeError, AttributeError, EOFError, zipfile.BadZipFile):
@@ -177,7 +179,7 @@ class FaceEngine:
         if not detection.exists() or not recognition.exists():
             raise RuntimeError("Models missing. Run: python download_models.py")
         detector = RetinaFace(detection)
-        detector.threshold = .3
+        detector.threshold = .65
         recognizer = ArcFace(recognition)
         self.detector, self.recognizer = detector, recognizer
 
@@ -185,9 +187,20 @@ class FaceEngine:
         self.refresh_people()
         reg = self.registration
         count = len(reg["features"]) if reg else 0
+        now = time.monotonic()
+        visible_tags = []
+        for entry in _ble_scanner.latest_results.values():
+            if now - entry.timestamp <= 10.0:
+                # Extract text from manufacturer data if present
+                mfr_bytes = entry.mfr_data.get(0xFFFF)
+                tag_name = mfr_bytes.decode("utf-8", errors="ignore").strip() if mfr_bytes else None
+                if not tag_name and entry.uuids:
+                    tag_name = entry.uuids[0][:8]
+                if tag_name:
+                    visible_tags.append({"tag": tag_name, "rssi": entry.rssi, "address": entry.address})
         return {
             "registered": bool(self.people), "person_count": len(self.people),
-            "people": [{key: person[key] for key in ("id", "name", "sample_count", "directory")} for person in self.people.values()],
+            "people": [{key: person.get(key) for key in ("id", "name", "sample_count", "directory", "ble_tag_id")} for person in self.people.values()],
             "invalid_profiles": self.invalid_profiles,
             "registering": reg is not None, "count": count, "total": TOTAL,
             "stage": STAGES[min(count // SAMPLES_PER_STAGE, len(STAGES) - 1)],
@@ -198,6 +211,9 @@ class FaceEngine:
             "calibration": self.calibration.status(), "warning": self.error,
             "detector": "RetinaFace R34", "recognizer": "ArcFace R50", "model_id": MODEL_ID,
             "registration_directory": self.registration_directory,
+            "ble_enabled": _ble_scanner.enabled,
+            "ble_last_scan": _ble_scanner.last_scan_time,
+            "ble_visible_tags": visible_tags,
         }
 
     def feature(self, frame, face):
@@ -233,6 +249,7 @@ class FaceEngine:
                 "sample_count": len(reg["images"]), "stages": STAGES,
                 "image_type": "face crop with margin, before alignment",
                 "images": [filename for filename, _ in reg["images"]],
+                "ble_tag_id": reg.get("ble_tag_id"),
             }
             metadata_path = folder / "metadata.json"
             with metadata_path.open("x") as output:
@@ -276,20 +293,49 @@ class FaceEngine:
                 metrics = quality_metrics(frame, face)
                 warning = rejection(metrics, self.pipeline.settings)
                 vector = None
-                # Calibration captures technically usable crops even if quality gates reject them.
+                # Extract embedding if face meets basic visibility and confidence
                 if metrics is not None and metrics['confidence'] >= .5 and metrics['brightness'] >= 25:
                     if self.calibration.active or warning is None:
                         vector = self.feature(frame, face)
+                
+                score_single = None
+                candidate_person = None
+                if vector is not None and templates is not None:
+                    similarities = templates @ vector
+                    best_single = int(np.argmax(similarities))
+                    score_single = float(np.clip(similarities[best_single], -1.0, 1.0))
+                    threshold = self.pipeline.settings['threshold'] if self.pipeline else THRESHOLD
+                    if score_single >= threshold:
+                        candidate_person = people[best_single]
+
                 track = assignments.get(index)
                 result = self.pipeline.observe(track, vector, metrics, people, now,
                                                record=not bool(self.calibration.active)) if track is not None else {
                     'person_id': None, 'similarity': None, 'confirmed': False, 'sample_count': 0}
-                person = self.people.get(result['person_id'])
+
+                confirmed_person = self.people.get(result.get('person_id'))
+                if confirmed_person:
+                    label = confirmed_person['name']
+                    person_id = confirmed_person['id']
+                elif candidate_person:
+                    label = candidate_person['name']
+                    person_id = candidate_person['id']
+                else:
+                    label = 'Unknown'
+                    person_id = None
+
+                similarity = result.get('similarity') if result.get('similarity') is not None else score_single
+                matched = bool(result.get('confirmed'))
+
+                ble_tag_id = self.people.get(person_id, {}).get("ble_tag_id") if person_id else None
+                ble_verified = matched and verify_tag(ble_tag_id, _ble_scanner.latest_results)
+
                 results.append(dict(box=face[:4].astype(float).tolist(),
                     landmarks=face[4:14].reshape(5, 2).astype(float).tolist(), confidence=float(face[14]),
-                    similarity=result['similarity'], label=person['name'] if person else 'Unknown',
-                    person_id=result['person_id'], matched=result['confirmed'], quality_warning=warning,
-                    track_id=track, sample_count=result['sample_count']))
+                    similarity=similarity, label=label,
+                    person_id=person_id, matched=matched, quality_warning=warning,
+                    track_id=track, sample_count=result.get('sample_count', 0),
+                    ble_verified=ble_verified))
                 observations.append(dict(embedding=vector, quality=metrics, track=track))
             was_calibrating = bool(self.calibration.active)
             self.calibration.observe(observations, people, now)
@@ -375,6 +421,8 @@ class FaceEngine:
                 message = "Face detected. Register a person to enable recognition."
             elif any(result['matched'] for result in results):
                 message = "Confirmed identity. Live recognition active."
+            elif any(result.get('label') != 'Unknown' for result in results):
+                message = "Recognizing face. Hold steady to confirm."
             elif self.pipeline and any(result.get('sample_count', 0) < self.pipeline.settings['min_samples'] for result in results):
                 message = "Collecting a few clear views before identifying entrants."
             else:
@@ -383,6 +431,9 @@ class FaceEngine:
             message = "Calibration recording active. Walk naturally, then finish the passage."
         return {"faces": results, "message": message, "completed": completed, "width": width, "height": height, **self.status()}
 
+
+_ble_scanner = BLEScanner()
+_ble_scanner.start()
 
 engine = FaceEngine()
 
@@ -410,7 +461,12 @@ def status():
 
 @app.post("/api/register")
 def register():
-    name = str((request.get_json(silent=True) or {}).get("name", "")).strip()
+    body = request.get_json(silent=True) or {}
+    name = str(body.get("name", "")).strip()
+    ble_tag_id = body.get("ble_tag_id")
+    if ble_tag_id is not None:
+        ble_tag_id = str(ble_tag_id).strip().lower() or None
+
     if not name or len(name) > 60:
         return jsonify(error="Enter a name of 1–60 characters."), 400
     with engine.lock:
@@ -418,7 +474,11 @@ def register():
             return jsonify(error="Finish or cancel calibration before registering."), 409
         if engine.pipeline:
             engine.pipeline.reset()
-        engine.registration = {"name": name, "features": [], "images": [], "poses": [], "baseline": np.array([0., 0.5]), "last_capture": 0.}
+        engine.registration = {
+            "name": name, "ble_tag_id": ble_tag_id,
+            "features": [], "images": [], "poses": [],
+            "baseline": np.array([0., 0.5]), "last_capture": 0.
+        }
         return jsonify(engine.status())
 
 
@@ -569,6 +629,61 @@ def entries():
             with path.open() as source:
                 records = [json.loads(line) for line in deque(source, maxlen=100)]
         return jsonify(entries=records)
+
+
+@app.patch("/api/people/<person_id>/ble")
+def pair_ble(person_id):
+    """Pair or un-pair a BLE tag to an existing person.
+
+    Request body: {"ble_tag_id": "alice"}  to pair.
+                  {"ble_tag_id": null}     to un-pair.
+    """
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        return jsonify(error="Send a JSON object."), 400
+    tag_id = body.get("ble_tag_id")  # None means un-pair
+    if tag_id is not None:
+        if not isinstance(tag_id, str) or not tag_id.strip():
+            return jsonify(error="ble_tag_id must be a non-empty string or null."), 400
+        tag_id = tag_id.strip().lower()
+        from ble_scanner import TAG_UUID_MAP
+        if tag_id not in TAG_UUID_MAP:
+            return jsonify(error=f"Unknown ble_tag_id '{tag_id}'. Known tags: {sorted(TAG_UUID_MAP)}."), 400
+    with engine.lock:
+        try:
+            folder = engine.person_folder(person_id)
+            target = folder / "metadata.json"
+            if target.is_symlink():
+                raise ValueError("Linked metadata is not supported.")
+            metadata = json.loads(target.read_text()) if target.exists() else {}
+            if not isinstance(metadata, dict):
+                raise ValueError("Invalid metadata.")
+            # Back up the original metadata.json once before first BLE write.
+            bak = target.with_suffix(".json.bak")
+            if target.exists() and not bak.exists():
+                shutil.copy2(target, bak)
+            if tag_id is None:
+                metadata.pop("ble_tag_id", None)
+            else:
+                metadata["ble_tag_id"] = tag_id
+            temp = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", dir=folder, prefix=".metadata-", suffix=".tmp", delete=False) as output:
+                    temp = Path(output.name)
+                    json.dump(metadata, output, indent=2)
+                    output.write("\n")
+                temp.replace(target)
+            finally:
+                if temp is not None:
+                    temp.unlink(missing_ok=True)
+            engine.refresh_people()
+            return jsonify(engine.status())
+        except FileNotFoundError:
+            return jsonify(error="Registration folder not found. Refresh the list."), 404
+        except ValueError as error:
+            return jsonify(error=str(error)), 400
+        except OSError as error:
+            return jsonify(error=str(error)), 503
 
 
 if __name__ == "__main__":

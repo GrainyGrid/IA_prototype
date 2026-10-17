@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -48,7 +49,8 @@ class TemporalTests(unittest.TestCase):
         pipeline.observe(7,None,self.quality,self.people,2.1)
         self.assertFalse(pipeline.observe(7,None,self.quality,self.people,2.2)['confirmed'])
         self.assertFalse(pipeline.observe(7,self.owner,self.quality,self.people[1:],2.4)['confirmed'])
-        self.assertEqual((self.path/'entries.jsonl').stat().st_mode & 0o777,0o600)
+        if os.name != 'nt':
+            self.assertEqual((self.path/'entries.jsonl').stat().st_mode & 0o777,0o600)
 
     def test_bytetrack_keeps_two_moving_faces_separate_and_resets_after_gap(self):
         pipeline=VideoPipeline(self.path,DEFAULTS)

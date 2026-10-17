@@ -20,19 +20,34 @@ ARCFACE_POINTS = np.array([
 
 def session(path):
     try:
+        import sys
+        from pathlib import Path
+        if sys.platform == "win32":
+            nv_root = Path(sys.prefix) / "Lib" / "site-packages" / "nvidia"
+            if nv_root.exists():
+                for bin_dir in nv_root.glob("*/bin"):
+                    if bin_dir.is_dir():
+                        os.add_dll_directory(str(bin_dir))
+                        os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+
         import onnxruntime as ort
+        if hasattr(ort, "preload_dlls"):
+            try:
+                ort.preload_dlls()
+            except Exception:
+                pass
     except ImportError as error:
         raise RuntimeError('Install dependencies: python -m pip install -r requirements.txt') from error
-    provider = os.environ.get('FACE_STUDIO_PROVIDER', 'CPUExecutionProvider')
-    if provider not in {'CPUExecutionProvider', 'CoreMLExecutionProvider'} or provider not in ort.get_available_providers():
+    provider = os.environ.get('FACE_STUDIO_PROVIDER', 'CPUExecutionProvider').strip()
+    if provider not in {'CPUExecutionProvider', 'CoreMLExecutionProvider', 'CUDAExecutionProvider', 'TensorrtExecutionProvider'} or provider not in ort.get_available_providers():
         raise RuntimeError(f'Unavailable inference provider: {provider}')
     options = ort.SessionOptions()
-    options.intra_op_num_threads = 4
+    cpu_count = os.cpu_count() or 4
+    threads = int(os.environ.get('FACE_STUDIO_THREADS', min(cpu_count, 6)))
+    options.intra_op_num_threads = max(1, threads)
+    options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     providers = [provider] if provider == 'CPUExecutionProvider' else [provider, 'CPUExecutionProvider']
-    try:
-        return ort.InferenceSession(str(path), sess_options=options, providers=providers)
-    except Exception as error:
-        raise RuntimeError(f'Could not load {Path(path).name}: {error}') from error
+    return ort.InferenceSession(str(path), sess_options=options, providers=providers)
 
 
 def alignment_matrix(points):

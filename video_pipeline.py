@@ -39,11 +39,11 @@ def quality_metrics(frame, face):
 def rejection(metrics, settings):
     if metrics is None:
         return 'Move closer and keep your entire face visible.'
-    if metrics['confidence'] < .9:
+    if metrics['confidence'] < .8:
         return 'Detection confidence is low. Face the camera more directly.'
     if metrics['size'] < settings['min_size']:
         return 'Move closer; your face is too small.'
-    if metrics['brightness'] < 45 or metrics['overexposed'] > .5:
+    if metrics['brightness'] < 30 or metrics['overexposed'] > .5:
         return 'Use even light in front of your face.'
     if metrics['yaw'] > settings['max_yaw']:
         return 'Turn your face toward the camera.'
@@ -58,10 +58,10 @@ def quality_weight(metrics):
 
 def decision(samples, people, settings, now):
     """Select diverse recent views, aggregate and demand agreeing individual matches."""
-    usable = [s for s in samples if 0 <= now-s['time'] <= 3 and rejection(s['quality'], settings) is None]
+    usable = [s for s in samples if 0 <= now-s['time'] <= 6 and rejection(s['quality'], settings) is None]
     usable = sorted(usable, key=lambda s: quality_weight(s['quality']), reverse=True)[:8]
-    empty = dict(person_id=None, similarity=None, sample_count=len(usable), confirmed=False)
-    if not people or len(usable) < settings['min_samples']:
+    empty = dict(person_id=None, candidate_id=None, similarity=None, sample_count=len(usable), confirmed=False)
+    if not people or not usable:
         return empty
     vectors = np.stack([s['embedding'] for s in usable])
     weights = np.array([quality_weight(s['quality']) for s in usable])
@@ -76,9 +76,15 @@ def decision(samples, people, settings, now):
     runner_up = float(np.partition(scores, -2)[-2]) if len(scores) > 1 else -1.
     individual = vectors @ templates.T
     agreeing = ((individual.argmax(1) == best) & (individual[:, best] >= settings['threshold'])).sum()
-    confirmed = score >= settings['threshold'] and score-runner_up >= settings['margin'] and agreeing >= settings['min_samples']
-    return dict(person_id=people[best]['id'] if confirmed else None, similarity=score,
-                sample_count=len(usable), confirmed=bool(confirmed))
+    confirmed = (len(usable) >= settings['min_samples']
+                 and score >= settings['threshold']
+                 and score-runner_up >= settings['margin']
+                 and agreeing >= settings['min_samples'])
+    return dict(person_id=people[best]['id'] if confirmed else None,
+                candidate_id=people[best]['id'] if score >= settings['threshold'] else None,
+                similarity=score,
+                sample_count=len(usable),
+                confirmed=bool(confirmed))
 
 
 def gallery_signature(people):
@@ -121,7 +127,7 @@ class VideoPipeline:
             self.sv = sv
             self.tracker = sv.ByteTrack(track_activation_threshold=.85, lost_track_buffer=45,
                                         frame_rate=7, minimum_consecutive_frames=1)
-        if self.last_time is not None and (now-self.last_time > 1.5 or frame_size != self.frame_size):
+        if self.last_time is not None and (now-self.last_time > 2.5 or frame_size != self.frame_size):
             self.reset()
         self.last_time, self.frame_size = now, frame_size
         boxes = np.asarray([f[:4] for f in faces], dtype=np.float32).reshape(-1, 4)
@@ -135,7 +141,7 @@ class VideoPipeline:
         for index, track in assignments.items():
             self.last_seen[track] = now
         for track in list(self.last_seen):
-            if now-self.last_seen[track] > 1.5:
+            if now-self.last_seen[track] > 2.5:
                 self.samples.pop(track, None); self.last_seen.pop(track, None)
         return assignments
 
@@ -151,8 +157,8 @@ class VideoPipeline:
         if usable and (not samples or now-samples[-1]['time'] >= .15):
             samples.append(dict(embedding=embedding.copy(), quality=quality, time=now))
         result = decision(samples, people, self.settings, now)
-        if samples and now-samples[-1]['time'] > 1:
-            result = dict(person_id=None, similarity=None, sample_count=0, confirmed=False)
+        if samples and now-samples[-1]['time'] > 1.15:
+            result = dict(person_id=None, candidate_id=None, similarity=None, sample_count=0, confirmed=False)
         if result['confirmed'] and record and track not in self.logged:
             person = next(p for p in people if p['id'] == result['person_id'])
             self.directory.mkdir(mode=0o700, parents=True, exist_ok=True)
