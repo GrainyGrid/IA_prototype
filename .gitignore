@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+models/*.onnx
+models/*.part
+data/*.npz
+data/*.tmp
+registration/
+.DS_Store
+data/calibration/
+data/entries.jsonl
+data/recognition_settings.json

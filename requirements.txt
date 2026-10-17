@@ -1,0 +1,6 @@
+Flask>=3.1,<4
+numpy>=2.2,<3
+opencv-python>=4.12,<5
+certifi>=2025.1.31
+onnxruntime>=1.23,<2
+supervision>=0.27,<0.28

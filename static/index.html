@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Face Studio · RetinaFace + ArcFace</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='10' fill='%23326951'/%3E%3Ctext x='20' y='30' text-anchor='middle' font-size='32' fill='white'%3E⌗%3C/text%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/app.js" defer></script>
+  <script src="/static/calibration.js" defer></script>
+</head>
+<body>
+<div class="shell">
+  <header><a class="brand" href="/" aria-label="Face Studio home"><span class="brand-icon">⌗</span> face<span>studio</span></a><div class="local"><i></i> LOCAL WORKSPACE</div></header>
+  <main>
+    <div class="heading"><div><div class="eyebrow">COMPUTER VISION / 01</div><h1>A familiar face.<br><span>In real time.</span></h1><p>Register once. Recognize yourself, frame by frame.</p></div><div class="engine"><span>DETECTION <b>RetinaFace</b></span><span>RECOGNITION <b>ArcFace</b></span></div></div>
+    <div class="workspace">
+      <section class="feed-panel" aria-label="Live webcam feed">
+        <div class="panel-top"><span><i id="live-dot"></i> LIVE FEED</span><span id="resolution">CAMERA OFF</span></div>
+        <div class="camera" id="camera">
+          <video id="video" autoplay muted playsinline></video><canvas id="overlay"></canvas>
+          <div class="camera-empty" id="empty"><div class="camera-symbol">◎</div><h2>Your camera, your workspace.</h2><p>Start your webcam to detect and register a face.</p><button id="start">Enable camera <span>↗</span></button></div>
+          <div class="feed-caption" id="caption" hidden><span id="mode-label">DETECTION MODE</span><span id="fps">— FPS</span></div>
+        </div>
+        <div class="feed-bottom"><span id="message" role="status" aria-live="polite">Ready when you are.</span><button id="stop" class="text-button" disabled>Stop camera</button></div>
+        <div class="metrics"><div><span>FACES IN FRAME</span><strong id="face-count">—</strong></div><div><span>DETECTION CONFIDENCE</span><strong id="confidence">—</strong></div><div><span>FACE SIMILARITY</span><strong id="similarity">—</strong></div></div>
+        <p class="score-note">RetinaFace confidence measures face detection. ArcFace cosine similarity measures resemblance (−1 to 1), not identity probability. Match threshold: <span id="match-threshold">—</span>.</p>
+      </section>
+      <aside>
+        <div class="tabs" role="tablist" aria-label="Workspace mode"><button role="tab" aria-selected="true" id="tab-live">Recognition</button><button role="tab" aria-selected="false" id="tab-register">Register face</button><button role="tab" aria-selected="false" id="tab-calibration">Calibration</button></div>
+        <section id="live-panel" class="side-content" role="tabpanel" aria-labelledby="tab-live">
+          <div class="eyebrow">REGISTERED PEOPLE</div><h2 id="profile-name">No people registered</h2><p id="profile-description">Add a person with guided captures from five angles.</p>
+          <div class="profile-info"><span>Recognition status</span><b id="profile-status">Not registered</b></div><div class="profile-info"><span>Total samples</span><b id="stored-samples">0</b></div>
+          <div id="people-list" class="people-list" aria-label="Registered people"></div>
+          <button id="refresh-people" class="text-button">Refresh people list</button>
+          <p class="small">Each folder is a separate registration. Deleting it removes that registration from recognition automatically. Other registrations of the same person remain active until removed.</p>
+          <h3>Recent sightings</h3><div id="entry-list" class="entry-list">No confirmed sightings yet.</div>
+          <button id="go-register" class="primary">Add a person <span>→</span></button>
+          <div class="tip"><span>↗</span><div><b>A clearer view, a better match.</b><p>Face a light source, remove anything covering your face, and keep the camera at eye level.</p></div></div>
+        </section>
+        <section id="register-panel" class="side-content" hidden role="tabpanel" aria-labelledby="tab-register">
+          <div class="eyebrow">GUIDED REGISTRATION</div><h2>Let’s get to know you.</h2><p>Capture eight clear samples at each angle. Turn gently and hold still when prompted.</p>
+          <label for="name">Your name</label><input id="name" maxlength="60" placeholder="e.g. Alex" autocomplete="given-name">
+          <div class="progress-heading"><span id="progress-title">Registration progress</span><b id="progress-text">0 / 40</b></div><progress id="progress" max="40" value="0">0%</progress>
+          <div class="angles" id="angles"><div data-stage="front"><span>◎</span><b>Front</b><small>0 / 8</small></div><div data-stage="left"><span>←</span><b>Left</b><small>0 / 8</small></div><div data-stage="right"><span>→</span><b>Right</b><small>0 / 8</small></div><div data-stage="up"><span>↑</span><b>Up</b><small>0 / 8</small></div><div data-stage="down"><span>↓</span><b>Down</b><small>0 / 8</small></div></div>
+          <div class="instruction" id="instruction">Enable your camera, enter your name, and begin.</div><button id="begin" class="primary" disabled>Begin registration <span>→</span></button><button id="cancel" class="text-button" hidden>Cancel registration</button><p class="small">This collects samples using a pretrained model; it does not retrain the neural network. Each completed registration adds a new person folder and keeps existing registrations.</p>
+        </section>
+        <section id="calibration-panel" class="side-content" hidden role="tabpanel" aria-labelledby="tab-calibration">
+          <div class="eyebrow">WALKING TESTS</div><h2>Calibrate your entrance.</h2>
+          <p>Record one person walking at a time. Label who they are, including people who are not registered. Keep others out of view during each test.</p>
+          <label for="calibration-person">Who is walking?</label><select id="calibration-person"><option value="">Unregistered person</option></select>
+          <label for="calibration-split">Test stage</label><select id="calibration-split"><option value="tuning">1. Tuning — find settings</option><option value="validation">2. Validation — fresh walking tests</option></select>
+          <div class="instruction" id="calibration-progress" role="status">Start the camera. Collect at least 2 registered passages and 1 unregistered passage for tuning.</div>
+          <button class="primary" id="calibration-start">Record passage</button>
+          <button class="primary" id="calibration-stop" hidden>Finish and save passage</button>
+          <button class="text-button" id="calibration-cancel" hidden>Discard current recording</button>
+          <div id="calibration-takes" class="calibration-takes"></div>
+          <button class="primary" id="calibration-analyze">Compare settings</button>
+          <div id="calibration-report" class="calibration-report" aria-live="polite"></div>
+          <button class="primary" id="calibration-apply" disabled>Apply reviewed settings</button>
+          <button class="text-button danger" id="calibration-clear">Clear calibration tests</button>
+          <p class="small">Record new validation passages after tuning: at least 2 registered and 1 unregistered. Settings change only when you click Apply. This is a pilot, not proof of facility accuracy. Measurements and embeddings stay on this computer; no video is saved.</p>
+        </section>
+        <div class="privacy"><span>◈</span><p><b>Processed on this computer.</b><br>Completed registrations save face images and embeddings in separate local folders. Live frames are not saved. Calibration stores measurements and embeddings; confirmed sightings are logged locally.</p></div>
+      </aside>
+    </div>
+  </main>
+  <footer><span>FACE STUDIO</span><span>RetinaFace detection + ArcFace recognition · ONNX Runtime</span></footer>
+</div>
+</body></html>

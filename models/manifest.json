@@ -1,0 +1,13 @@
+{
+  "retinaface_r34.onnx": {
+    "url": "https://github.com/yakhyo/retinaface-pytorch/releases/download/v0.0.1/retinaface_r34.onnx",
+    "sha256": "bd0263dc2a465d32859555cb1741f2d98991eb0053696e8ee33fec583d30e630",
+    "size": 88502283
+  },
+  "w600k_r50.onnx": {
+    "url": "https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip",
+    "member": "w600k_r50.onnx",
+    "sha256": "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43",
+    "size": 174383860
+  }
+}
