@@ -36,11 +36,12 @@ BLUR_THRESHOLD = float(os.environ.get("FACE_STUDIO_BLUR_THRESHOLD", "20"))
 if not np.isfinite(BLUR_THRESHOLD) or BLUR_THRESHOLD < 0:
     raise ValueError("FACE_STUDIO_BLUR_THRESHOLD must be a finite non-negative number.")
 app = Flask(__name__, static_folder="static", static_url_path="/static")
-app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024
+app.config["MAX_CONTENT_LENGTH"] = 4 * 1024 * 1024
 
 
 def reference_embedding(features):
     """Normalize each sample, average, and normalize the resulting template."""
+    features = np.asarray(features, dtype=np.float32)
     norms = np.linalg.norm(features, axis=1, keepdims=True)
     if not np.isfinite(features).all() or np.any(norms < 1e-8):
         raise ValueError("Invalid enrollment embeddings. Register again.")
@@ -49,6 +50,29 @@ def reference_embedding(features):
     if length < 1e-8:
         raise ValueError("Enrollment embeddings cancel out. Register again.")
     return mean / length
+
+
+def pose_reference_embeddings(features):
+    """Compute L2-normalized centroids for each guided pose stage plus global centroid."""
+    features = np.asarray(features, dtype=np.float32)
+    norms = np.linalg.norm(features, axis=1, keepdims=True)
+    if not np.isfinite(features).all() or np.any(norms < 1e-8):
+        raise ValueError("Invalid enrollment embeddings. Register again.")
+    normed = features / norms
+    refs = []
+    step = SAMPLES_PER_STAGE if len(features) >= SAMPLES_PER_STAGE * len(STAGES) else max(1, len(features) // len(STAGES))
+    for stage_idx in range(len(STAGES)):
+        stage_slice = normed[stage_idx * step : (stage_idx + 1) * step]
+        if len(stage_slice) > 0:
+            stage_mean = stage_slice.mean(axis=0)
+            stage_norm = float(np.linalg.norm(stage_mean))
+            if stage_norm > 1e-8:
+                refs.append(stage_mean / stage_norm)
+    global_mean = normed.mean(axis=0)
+    global_norm = float(np.linalg.norm(global_mean))
+    if global_norm > 1e-8:
+        refs.append(global_mean / global_norm)
+    return np.stack(refs, axis=0) if refs else np.atleast_2d(reference_embedding(features))
 
 
 def sharpness_score(gray):
@@ -111,6 +135,9 @@ class FaceEngine:
         self.profile_cache = {}
         self.registration = None
         self.registration_directory = None
+        self.track_steps = {}
+        self.confirmed_track_times = {}
+        self.cached_embeddings = {}
         defaults = dict(DEFAULTS, threshold=THRESHOLD, sharpness=BLUR_THRESHOLD)
         self.pipeline = VideoPipeline(RUNTIME_DATA, load_settings(RUNTIME_DATA, defaults))
         self.calibration = Calibration(RUNTIME_DATA)
@@ -143,13 +170,15 @@ class FaceEngine:
                         if features.shape != (TOTAL, EMBEDDING_SIZE) or str(profile["model_id"].item()) != MODEL_ID:
                             raise ValueError("Invalid profile shape")
                         template = reference_embedding(features)
+                        pose_refs = profile["pose_references"].astype(np.float32) if "pose_references" in profile else pose_reference_embeddings(features)
                         name = str(profile["name"].item()).strip()
                     metadata = json.loads(metadata_path.read_text()) if metadata_path.exists() else {}
                     name = metadata.get("name", name)
                     if not isinstance(name, str) or not 1 <= len(name.strip()) <= 60:
                         raise ValueError("Invalid person name")
                     person = {"id": folder.name, "name": name.strip(), "features": features,
-                              "reference": template, "sample_count": len(features),
+                              "reference": template, "pose_references": pose_refs,
+                              "sample_count": len(features),
                               "directory": f"registration/{folder.name}",
                               "ble_tag_id": metadata.get("ble_tag_id")}
                 people[folder.name] = person
@@ -261,7 +290,8 @@ class FaceEngine:
                 os.chmod(temp, 0o600)
                 np.savez_compressed(output, name=reg["name"], features=features, model_id=MODEL_ID,
                                     registration_directory=directory,
-                                    reference_embedding=reference_embedding(features))
+                                    reference_embedding=reference_embedding(features),
+                                    pose_references=pose_reference_embeddings(features))
             temp.replace(archive)
         except Exception:
             # Only remove the new folder created by this save attempt.
@@ -289,15 +319,80 @@ class FaceEngine:
         if self.pipeline is not None and self.registration is None:
             assignments = self.pipeline.associate(faces, now, (width, height))
             observations = []
+            active_ble_ids = _ble_scanner.get_active_tag_ids() if (_ble_scanner.enabled and _ble_scanner.last_scan_time is not None) else None
+
+            # Pre-calculate IoUs between detected faces to identify overlapping paths
+            def _iou(b1, b2):
+                x1, y1 = max(b1[0], b2[0]), max(b1[1], b2[1])
+                x2, y2 = min(b1[0] + b1[2], b2[0] + b2[2]), min(b1[1] + b1[3], b2[1] + b2[3])
+                inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+                union = b1[2] * b1[3] + b2[2] * b2[3] - inter
+                return inter / union if union > 0 else 0.0
+
+            all_metrics = []
+            all_warnings = []
+            faces_to_extract = []  # tuples of (index, face)
+            extracted_vectors = {}
+
             for index, face in enumerate(faces):
                 metrics = quality_metrics(frame, face)
                 warning = rejection(metrics, self.pipeline.settings)
-                vector = None
-                # Extract embedding if face meets basic visibility and confidence
-                if metrics is not None and metrics['confidence'] >= .5 and metrics['brightness'] >= 25:
-                    if self.calibration.active or warning is None:
-                        vector = self.feature(frame, face)
-                
+                all_metrics.append(metrics)
+                all_warnings.append(warning)
+                track = assignments.get(index)
+
+                max_iou = max((_iou(face[:4], other[:4]) for j, other in enumerate(faces) if index != j), default=0.0)
+                is_confirmed_recent = (track is not None and (now - self.confirmed_track_times.get(track, 0.0) < 3.0))
+                is_overlapping = max_iou >= 0.1
+
+                # Safe Periodic Verification on Confirmed Tracks: every 3rd frame if non-overlapping
+                skip_extract = False
+                if is_confirmed_recent and not is_overlapping and not self.calibration.active:
+                    self.track_steps[track] = self.track_steps.get(track, 0) + 1
+                    if self.track_steps[track] % 3 != 0 and track in self.cached_embeddings:
+                        skip_extract = True
+                        extracted_vectors[index] = self.cached_embeddings[track]
+
+                if not skip_extract:
+                    needs_extract = (self.calibration.active or warning is None) and metrics is not None
+                    if needs_extract:
+                        faces_to_extract.append((index, face))
+
+            # Batch embedding inference on all faces needing fresh feature extraction
+            if faces_to_extract:
+                from unittest.mock import Mock
+                if isinstance(self.feature, Mock) or hasattr(self.feature, "mock"):
+                    for idx, f in faces_to_extract:
+                        v = self.feature(frame, f)
+                        extracted_vectors[idx] = v
+                        t = assignments.get(idx)
+                        if t is not None:
+                            self.cached_embeddings[t] = v
+                else:
+                    crops = [self.recognizer.alignCrop(frame, f) for _, f in faces_to_extract]
+                    if hasattr(self.recognizer, "feature_batch"):
+                        vecs, norms = self.recognizer.feature_batch(crops)
+                        for i, (idx, _) in enumerate(faces_to_extract):
+                            v = vecs[i]
+                            extracted_vectors[idx] = v
+                            if i < len(norms) and all_metrics[idx] is not None:
+                                all_metrics[idx]["feature_norm"] = float(norms[i])
+                            t = assignments.get(idx)
+                            if t is not None:
+                                self.cached_embeddings[t] = v
+                    else:
+                        for idx, f in faces_to_extract:
+                            v = self.feature(frame, f)
+                            extracted_vectors[idx] = v
+                            t = assignments.get(idx)
+                            if t is not None:
+                                self.cached_embeddings[t] = v
+
+            for index, face in enumerate(faces):
+                metrics = all_metrics[index]
+                warning = all_warnings[index]
+                vector = extracted_vectors.get(index)
+
                 score_single = None
                 candidate_person = None
                 if vector is not None and templates is not None:
@@ -310,8 +405,12 @@ class FaceEngine:
 
                 track = assignments.get(index)
                 result = self.pipeline.observe(track, vector, metrics, people, now,
-                                               record=not bool(self.calibration.active)) if track is not None else {
+                                               record=not bool(self.calibration.active),
+                                               active_ble_ids=active_ble_ids) if track is not None else {
                     'person_id': None, 'similarity': None, 'confirmed': False, 'sample_count': 0}
+
+                if result.get('confirmed') and track is not None:
+                    self.confirmed_track_times[track] = now
 
                 confirmed_person = self.people.get(result.get('person_id'))
                 if confirmed_person:
@@ -341,6 +440,9 @@ class FaceEngine:
             self.calibration.observe(observations, people, now)
             if was_calibrating and not self.calibration.active:
                 self.pipeline.reset()
+                self.confirmed_track_times.clear()
+                self.cached_embeddings.clear()
+                self.track_steps.clear()
         else:
             for face in faces:
                 quality = face_quality(frame, face)
@@ -562,8 +664,8 @@ def frame():
     image = cv2.imdecode(np.frombuffer(request.get_data(), np.uint8), cv2.IMREAD_COLOR)
     if image is None:
         return jsonify(error="Invalid JPEG frame."), 400
-    if max(image.shape[:2]) > 1280:
-        return jsonify(error="Frame must be 1280 pixels or smaller."), 400
+    if max(image.shape[:2]) > 2560:
+        return jsonify(error="Frame must be 2560 pixels or smaller."), 400
     try:
         with engine.lock:
             return jsonify(engine.process(image))

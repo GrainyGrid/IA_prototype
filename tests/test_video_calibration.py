@@ -75,7 +75,7 @@ class TemporalTests(unittest.TestCase):
         self.save_take(c,'b','tuning',self.other)
         self.save_take(c,None,'tuning',self.unknown)
         report=c.analyze(self.people,DEFAULTS)
-        self.assertEqual(report['candidate_count'],144)
+        self.assertEqual(report['candidate_count'],288)
         self.assertFalse(report['can_apply'])
         candidate=dict(report['settings'])
         with self.assertRaises(ValueError): c.apply(self.people,self.path)

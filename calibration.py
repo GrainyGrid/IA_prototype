@@ -71,8 +71,8 @@ class Calibration:
             raise ValueError('Select a valid registered person or Unregistered.')
         if split not in {'tuning', 'validation'}:
             raise ValueError('Choose tuning or validation.')
-        if len(self.takes()) >= 50:
-            raise ValueError('Calibration is limited to 50 passages. Clear old tests to continue.')
+        if len(self.takes()) >= 200:
+            raise ValueError('Calibration is limited to 200 passages. Clear old tests to continue.')
         if split == 'validation' and self.report is None:
             raise ValueError('Analyze tuning recordings before collecting validation.')
         if split == 'validation':
@@ -194,7 +194,7 @@ class Calibration:
             raise ValueError('Record at least 2 registered tuning passages and 1 unregistered tuning passage.')
         if self.report is None:
             best = None
-            for sharp,size,yaw,threshold,count,margin in product([10.,20.,35.],[70.,100.],[.25,.4],[.5,.6,.7],[2,3],[.04,.08]):
+            for sharp,size,yaw,threshold,count,margin in product([10.,15.,25.],[35.,50.,80.],[.30,.48],[.52,.56,.60,.66],[2,3],[.04,.08]):
                 settings = dict(sharpness=sharp,min_size=size,max_yaw=yaw,threshold=threshold,min_samples=count,margin=margin)
                 result = self.evaluate(tuning, people, settings)
                 # Prioritize identity errors, then misses/duplicates. Prefer stricter ties.
@@ -203,7 +203,7 @@ class Calibration:
                 if best is None or rank < best[0]:
                     best = (rank, settings, result)
             self.report = dict(settings=best[1], tuning=best[2], gallery=gallery_signature(people),
-                               candidate_count=144)
+                               candidate_count=288)
         if self.report['gallery'] != gallery_signature(people):
             raise ValueError('Gallery changed; record new tests.')
         self.report['baseline_tuning'] = self.evaluate(tuning, people, current)

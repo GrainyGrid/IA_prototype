@@ -38,12 +38,16 @@ def session(path):
                 pass
     except ImportError as error:
         raise RuntimeError('Install dependencies: python -m pip install -r requirements.txt') from error
-    provider = os.environ.get('FACE_STUDIO_PROVIDER', 'CPUExecutionProvider').strip()
-    if provider not in {'CPUExecutionProvider', 'CoreMLExecutionProvider', 'CUDAExecutionProvider', 'TensorrtExecutionProvider'} or provider not in ort.get_available_providers():
-        raise RuntimeError(f'Unavailable inference provider: {provider}')
+    available = ort.get_available_providers()
+    if 'FACE_STUDIO_PROVIDER' in os.environ:
+        provider = os.environ['FACE_STUDIO_PROVIDER'].strip()
+        if provider not in available:
+            raise RuntimeError(f'Unavailable inference provider: {provider}')
+    else:
+        provider = 'CUDAExecutionProvider' if 'CUDAExecutionProvider' in available else 'CPUExecutionProvider'
     options = ort.SessionOptions()
-    cpu_count = os.cpu_count() or 4
-    threads = int(os.environ.get('FACE_STUDIO_THREADS', min(cpu_count, 6)))
+    cpu_count = os.cpu_count() or 10
+    threads = int(os.environ.get('FACE_STUDIO_THREADS', min(cpu_count, 10)))
     options.intra_op_num_threads = max(1, threads)
     options.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
     providers = [provider] if provider == 'CPUExecutionProvider' else [provider, 'CPUExecutionProvider']
@@ -77,9 +81,13 @@ class RetinaFace:
     def __init__(self, path):
         self.session = session(path)
         self.input_name = self.session.get_inputs()[0].name
+        self.target_size = int(os.environ.get('FACE_STUDIO_DET_SIZE', '960'))
         self.size = 640
         self.priors = self.make_priors(self.size)
         self.threshold = .85
+        # Fast gamma LUT (gamma = 0.55) for low-light / outdoor canopy backlight
+        self._gamma_lut = np.array([((i / 255.0) ** 0.55) * 255 for i in range(256)], dtype=np.uint8)
+        self._clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
     @staticmethod
     def make_priors(size):
@@ -93,15 +101,32 @@ class RetinaFace:
         return np.asarray(priors, dtype=np.float32)
 
     def setInputSize(self, size):
-        # Adapter for the existing service. Inference always uses a 640px square.
-        pass
+        if isinstance(size, (tuple, list)):
+            target = min(self.target_size, int(max(size)))
+        else:
+            target = int(size)
+            self.target_size = target
+        target = max(320, (target // 32) * 32)  # Align with max anchor stride 32
+        if target != self.size:
+            self.size = target
+            self.priors = self.make_priors(self.size)
 
     def detect(self, frame):
         height, width = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        p90_p25 = float(np.percentile(gray, 90) - np.percentile(gray, 25)) if gray.size > 0 else 0.0
+        if gray.mean() < 55.0 or p90_p25 > 110.0:
+            gamma_corrected = cv2.LUT(frame, self._gamma_lut)
+            ycrcb = cv2.cvtColor(gamma_corrected, cv2.COLOR_BGR2YCrCb)
+            ycrcb[:, :, 0] = self._clahe.apply(ycrcb[:, :, 0])
+            det_frame = cv2.cvtColor(ycrcb, cv2.COLOR_YCrCb2BGR)
+        else:
+            det_frame = frame
+
         scale = min(self.size / width, self.size / height)
         resized_width, resized_height = round(width * scale), round(height * scale)
         canvas = np.full((self.size, self.size, 3), (104, 117, 123), dtype=np.uint8)
-        canvas[:resized_height, :resized_width] = cv2.resize(frame, (resized_width, resized_height))
+        canvas[:resized_height, :resized_width] = cv2.resize(det_frame, (resized_width, resized_height))
         blob = (canvas.astype(np.float32) - np.array([104, 117, 123], np.float32)).transpose(2, 0, 1)[None]
         try:
             loc, conf, landmarks = self.session.run(None, {self.input_name: blob})
@@ -150,3 +175,19 @@ class ArcFace:
         if vector.shape != (EMBEDDING_SIZE,) or not np.isfinite(vector).all() or length < 1e-8:
             raise RuntimeError('Invalid ArcFace embedding; use the bundled w600k_r50 checkpoint.')
         return vector / length
+
+    def feature_batch(self, aligned_crops):
+        if not aligned_crops:
+            return np.empty((0, EMBEDDING_SIZE), dtype=np.float32), []
+        blob = cv2.dnn.blobFromImages(aligned_crops, 1 / 127.5, (112, 112),
+                                     (127.5, 127.5, 127.5), swapRB=True)
+        try:
+            raw_vectors = self.session.run(None, {self.input_name: blob})[0]
+        except Exception as error:
+            raise RuntimeError(f'ArcFace batch inference failed: {error}') from error
+        raw_vectors = np.asarray(raw_vectors, dtype=np.float32).reshape(len(aligned_crops), -1)
+        norms = np.linalg.norm(raw_vectors, axis=1)
+        if raw_vectors.shape[1] != EMBEDDING_SIZE or not np.isfinite(raw_vectors).all() or (norms < 1e-8).any():
+            raise RuntimeError('Invalid ArcFace batch embedding; use the bundled w600k_r50 checkpoint.')
+        normalized = raw_vectors / norms[:, None]
+        return normalized, norms.astype(np.float32).tolist()

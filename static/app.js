@@ -282,11 +282,11 @@ async function loop(token) {
   if (!running || token !== generation) return;
   try {
     if (video.readyState >= 2) {
-      const scale = Math.min(1, 960 / Math.max(video.videoWidth, video.videoHeight));
+      const scale = Math.min(1, 1920 / Math.max(video.videoWidth, video.videoHeight));
       const width = Math.round(video.videoWidth * scale), height = Math.round(video.videoHeight * scale);
       capture.width = width; capture.height = height;
       capture.getContext('2d').drawImage(video, 0, 0, width, height);
-      const blob = await new Promise(resolve => capture.toBlob(resolve, 'image/jpeg', 0.80));
+      const blob = await new Promise(resolve => capture.toBlob(resolve, 'image/jpeg', 0.90));
       if (!running || token !== generation) return;
       controller = new AbortController();
       const timeout = setTimeout(() => controller?.abort(), 15000);
@@ -308,7 +308,7 @@ async function startCamera() {
   $('start').disabled = true;
   try {
     if (!navigator.mediaDevices?.getUserMedia) throw new Error('Camera access needs localhost or HTTPS. Open http://127.0.0.1:5000.');
-    stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' }, audio: false });
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 }, facingMode: 'user' }, audio: false });
     video.srcObject = stream; await video.play();
     update(await api('/api/video/reset', { method: 'POST' }));
     stream.getVideoTracks()[0].addEventListener('ended', () => stopCamera());

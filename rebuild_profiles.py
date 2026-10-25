@@ -17,7 +17,9 @@ def rebuild_folder(engine, folder):
         raise ValueError("Linked profiles are not supported.")
     if target.exists():
         with np.load(target, allow_pickle=False) as profile:
-            if str(profile['model_id'].item()) == MODEL_ID and profile['features'].shape == (service.TOTAL, EMBEDDING_SIZE):
+            if (str(profile['model_id'].item()) == MODEL_ID and
+                profile['features'].shape == (service.TOTAL, EMBEDDING_SIZE) and
+                'pose_references' in profile):
                 service.reference_embedding(profile['features'])
                 return 'already converted'
         raise ValueError('An incompatible ArcFace archive exists. Preserve it elsewhere before rebuilding.')
@@ -53,6 +55,7 @@ def rebuild_folder(engine, folder):
             os.chmod(temporary, 0o600)
             np.savez_compressed(output, name=name.strip(), features=features, model_id=MODEL_ID,
                                 reference_embedding=service.reference_embedding(features),
+                                pose_references=service.pose_reference_embeddings(features),
                                 registration_directory=f'registration/{folder.name}')
         temporary.replace(target)
     finally:

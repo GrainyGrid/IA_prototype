@@ -15,10 +15,10 @@ import time
 
 log = logging.getLogger(__name__)
 
-BLE_SCAN_INTERVAL = float(os.environ.get("BLE_SCAN_INTERVAL", "5.0"))
+BLE_SCAN_INTERVAL = float(os.environ.get("BLE_SCAN_INTERVAL", "1.0"))
 BLE_SCAN_DURATION = float(os.environ.get("BLE_SCAN_DURATION", "2.0"))
-BLE_RSSI_FLOOR    = int(os.environ.get("BLE_RSSI_FLOOR", "-80"))
-BLE_RESULT_TTL    = float(os.environ.get("BLE_RESULT_TTL", "10.0"))
+BLE_RSSI_FLOOR    = int(os.environ.get("BLE_RSSI_FLOOR", "-78"))
+BLE_RESULT_TTL    = float(os.environ.get("BLE_RESULT_TTL", "3.5"))
 BLE_ENABLED       = os.environ.get("BLE_DISABLED", "").strip() not in {"1", "true", "yes"}
 
 MFG_COMPANY_ID = 0xFFFF
@@ -89,6 +89,27 @@ class BLEScanner:
             except OSError:
                 pass
 
+    def get_active_tag_ids(self) -> set[str]:
+        if not self.enabled:
+            return set()
+        now = time.monotonic()
+        active = set()
+        with self._lock:
+            entries = list(self.latest_results.values())
+        for entry in entries:
+            if now - entry.timestamp > BLE_RESULT_TTL:
+                continue
+            if entry.rssi < BLE_RSSI_FLOOR:
+                continue
+            payload = entry.mfr_data.get(MFG_COMPANY_ID)
+            if payload:
+                tag = payload.decode("utf-8", errors="ignore").strip().lower()
+                if tag:
+                    active.add(tag)
+            for u in entry.uuids:
+                active.add(u.strip().lower())
+        return active
+
     def _run(self) -> None:
         script_path = os.path.abspath(__file__)
         while not self._stop_event.is_set():
@@ -114,10 +135,18 @@ class BLEScanner:
 
                     now = time.monotonic()
                     fresh: dict[str, ScanEntry] = {}
+                    with self._lock:
+                        prev_results = dict(self.latest_results)
                     for addr, item in raw_items.items():
+                        raw_rssi = int(item["rssi"])
+                        prev_entry = prev_results.get(addr)
+                        if prev_entry is not None:
+                            smoothed_rssi = int(round(0.5 * raw_rssi + 0.5 * prev_entry.rssi))
+                        else:
+                            smoothed_rssi = raw_rssi
                         fresh[addr] = ScanEntry(
                             address=addr,
-                            rssi=int(item["rssi"]),
+                            rssi=smoothed_rssi,
                             uuids=list(item["uuids"]),
                             mfr_data={
                                 int(cid): bytes.fromhex(hex_val)
